@@ -4,68 +4,72 @@ workflows:
     max_build_duration: 45
     instance_type: mac_mini_m2
     environment:
+      flutter: stable
       vars:
         SUPABASE_URL: "https://tdencfjfixgrycsjijqe.supabase.co"
         SUPABASE_ANON_KEY: "sb_publishable_olirDTCYE7ah8GEceJpvGg_sgsojlwh"
-      flutter: stable
     triggering:
       events:
         - push
       branch_patterns:
-        - pattern: 'main'
+        - pattern: "main"
           include: true
     scripts:
-      - name: Génération automatique du pubspec.yaml s'il est absent
+      - name: Localiser la racine du projet Flutter
         script: |
-          if [ ! -f "pubspec.yaml" ]; then
-            cat <<EOF > pubspec.yaml
-          name: btp_manager_socle
-          description: Application de gestion de projets et chantiers BTP avec Flutter et Supabase.
-          publish_to: 'none'
-          version: 1.0.0+1
+          # Cherche pubspec.yaml à la racine, sinon dans un sous-dossier (ex: btp_manager_socle/)
+          if [ -f "$CM_BUILD_DIR/pubspec.yaml" ]; then
+            PROJECT_DIR="$CM_BUILD_DIR"
+          else
+            PUBSPEC=$(find "$CM_BUILD_DIR" -maxdepth 3 -name pubspec.yaml -not -path "*/.dart_tool/*" | head -n 1)
+            if [ -z "$PUBSPEC" ]; then
+              echo "ERREUR : aucun pubspec.yaml trouvé dans le dépôt. Poussez le contenu du projet (lib/, pubspec.yaml, supabase/...)."
+              exit 1
+            fi
+            PROJECT_DIR=$(dirname "$PUBSPEC")
+          fi
+          echo "Racine du projet : $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $CM_ENV
 
-          environment:
-            sdk: '>=3.2.0 <4.0.0'
-
-          dependencies:
-            flutter:
-              sdk: flutter
-            supabase_flutter: ^2.5.0
-            go_router: ^14.0.0
-            flutter_dotenv: ^5.1.0
-            intl: ^0.19.0
-            cupertino_icons: ^1.0.6
-
-          dev_dependencies:
-            flutter_test:
-              sdk: flutter
-            flutter_lints: ^3.0.0
-
-          flutter:
-            uses-material-design: true
-            assets:
-              - .env
-          EOF
+      - name: Vérifier le code source
+        script: |
+          cd "$PROJECT_DIR"
+          for f in lib/main.dart lib/app.dart; do
+            [ -f "$f" ] || { echo "ERREUR : $f manquant"; exit 1; }
+          done
+          grep -q "flutter_riverpod" pubspec.yaml || { echo "ERREUR : pubspec.yaml n'est pas celui du projet (flutter_riverpod absent)"; exit 1; }
+          if grep -rn "package:material_ui" lib; then
+            echo "ERREUR : import invalide package:material_ui (utiliser package:flutter/material.dart)"; exit 1
           fi
 
-      - name: Initialisation des dossiers natifs Flutter (android/ios)
-        script: flutter create . --org com.btpmanager --project-name btp_manager_socle
-
-      - name: Création du fichier .env pour Supabase
+      - name: Générer les dossiers natifs (android)
         script: |
-          cat <<EOF > .env
-          SUPABASE_URL=$SUPABASE_URL
-          SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
-          EOF
+          cd "$PROJECT_DIR"
+          # Ne remplace ni lib/ ni pubspec.yaml existants ; nom du package = btp_manager (utilisé par les tests)
+          flutter create . --org com.btpmanager --project-name btp_manager --platforms=android
+          # Le test modèle généré référence MyApp (inexistant dans ce projet)
+          rm -f test/widget_test.dart
 
-      - name: Installation des dépendances
-        script: flutter pub get
+      - name: Créer le fichier .env (Supabase)
+        script: |
+          cd "$PROJECT_DIR"
+          printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
+
+      - name: Installer les dépendances
+        script: |
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Tests unitaires
+        ignore_failure: true
+        script: |
+          cd "$PROJECT_DIR"
+          flutter test
 
       - name: Compilation APK Release
         script: |
-          flutter build apk --release \
-            --dart-define=SUPABASE_URL=$SUPABASE_URL \
-            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          cd "$PROJECT_DIR"
+          flutter build apk --release
 
     artifacts:
-      - build/app/outputs/flutter-apk/*.apk
+      - "**/build/app/outputs/flutter-apk/*.apk"
