@@ -1,0 +1,100 @@
+workflows:
+  # ---------------------------------------------------------------------------
+  # 1. WORKFLOW DE VÉRIFICATION (Tests unitaires & Analyse statique)
+  # Déclenché sur chaque Pull Request ou push sur les branches de développement
+  # ---------------------------------------------------------------------------
+  flutter-analyze-and-test:
+    name: Analyse et Tests Flutter
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    triggering:
+      events:
+        - pull_request
+        - push
+      branch_patterns:
+        - pattern: 'develop'
+          include: true
+        - pattern: 'feature/*'
+          include: true
+    scripts:
+      - name: Récupération des dépendances Flutter
+        script: flutter pub get
+
+      - name: Analyse statique du code (Dart Analyzer)
+        script: flutter analyze
+
+      - name: Exécution des tests unitaires (Chemin critique & Ressources)
+        script: flutter test
+    artifacts:
+      - build/**/outputs/**/*.log
+
+  # ---------------------------------------------------------------------------
+  # 2. WORKFLOW DE BUILD PRODUCTION (Android APK/AAB & iOS IPA)
+  # Déclenché sur la branche principale (main)
+  # ---------------------------------------------------------------------------
+  btp-manager-release:
+    name: Build Release Android & iOS
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic
+    environment:
+      vars:
+        SUPABASE_URL: "https://tdencfjfixgrycsjijqe.supabase.co"
+        SUPABASE_ANON_KEY: "sb_publishable_olirDTCYE7ah8GEceJpvGg_sgsojlwh"
+        PACKAGE_NAME: "com.votreentreprise.btpmanager"
+        BUNDLE_ID: "com.votreentreprise.btpmanager"
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'main'
+          include: true
+    scripts:
+      - name: Création du fichier .env pour Supabase
+        script: |
+          cat <<EOF > .env
+          SUPABASE_URL=$SUPABASE_URL
+          SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          EOF
+
+      - name: Récupération des dépendances Flutter
+        script: flutter pub get
+
+      - name: Exécution des tests avant compilation
+        script: flutter test
+
+      - name: Build Android App Bundle (.aab) et APK
+        script: |
+          flutter build appbundle --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          flutter build apk --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+
+      - name: Configuration et Build iOS (.ipa)
+        script: |
+          xcode-project use-profiles
+          flutter build ipa --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
+            --export-options-plist=/Users/builder/export_options.plist
+
+    artifacts:
+      - build/app/outputs/bundle/**/*.aab
+      - build/app/outputs/flutter-apk/**/*.apk
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+
+    publishing:
+      email:
+        recipients:
+          - votre.email@domaine.com
+        notify:
+          success: true
+          failure: true
