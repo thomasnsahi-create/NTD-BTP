@@ -88,6 +88,21 @@ workflows:
           perl -pi -e 's#android:label="[^"]*"#android:label="BTP MANAGER"#' "$MANIFEST"
           grep -q "android.permission.INTERNET" "$MANIFEST" || { echo "ERREUR : permission INTERNET non ajoutée"; exit 1; }
 
+      - name: Désactiver le lint vital des plugins (bug lint JDK)
+        script: |
+          # Le lint Android plante dans image_picker_android (NoSuchMethodError List.removeLast).
+          # Un init script Gradle global s'applique aussi aux plugins.
+          mkdir -p "$HOME/.gradle/init.d"
+          printf '%s\n' \
+            'allprojects {' \
+            '  tasks.configureEach { t ->' \
+            '    if (t.name.startsWith("lintVital") || t.name.startsWith("lintAnalyze") || t.name.startsWith("lintReport")) {' \
+            '      t.enabled = false' \
+            '    }' \
+            '  }' \
+            '}' > "$HOME/.gradle/init.d/disable-lint-vital.gradle"
+          cat "$HOME/.gradle/init.d/disable-lint-vital.gradle"
+
       - name: Créer le fichier .env (Supabase)
         script: |
           cd "$PROJECT_DIR"
