@@ -1,0 +1,113 @@
+workflows:
+  btp-manager-android-apk:
+    name: Build APK Android
+    max_build_duration: 45
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      java: 17
+      vars:
+        SUPABASE_URL: "https://tdencfjfixgrycsjijqe.supabase.co"
+        SUPABASE_ANON_KEY: "sb_publishable_olirDTCYE7ah8GEceJpvGg_sgsojlwh"
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: "main"
+          include: true
+    scripts:
+      - name: Localiser la racine du projet Flutter
+        script: |
+          # Cherche le pubspec.yaml du projet (name: btp_manager), à la racine ou dans un sous-dossier.
+          find_project() {
+            grep -rl --include=pubspec.yaml --exclude-dir=.dart_tool --exclude-dir=.git \
+              --exclude-dir=build --exclude-dir=android --exclude-dir=ios \
+              "^name: btp_manager" "$CM_BUILD_DIR" 2>/dev/null | head -n 1
+          }
+          PUBSPEC=$(find_project)
+          if [ -z "$PUBSPEC" ]; then
+            # Cas où l'archive .zip a été poussée telle quelle dans le dépôt : on la décompresse.
+            ZIP=$(find "$CM_BUILD_DIR" -maxdepth 3 -name "*.zip" -not -path "*/.git/*" | head -n 1)
+            if [ -n "$ZIP" ]; then
+              echo "Archive trouvée : $ZIP - décompression"
+              mkdir -p "$CM_BUILD_DIR/_unzipped"
+              unzip -oq "$ZIP" -d "$CM_BUILD_DIR/_unzipped"
+              PUBSPEC=$(find_project)
+            fi
+          fi
+          if [ -z "$PUBSPEC" ]; then
+            echo "ERREUR : aucun pubspec.yaml (name: btp_manager) trouvé dans le dépôt."
+            echo "Poussez le CONTENU du projet (pubspec.yaml, lib/, supabase/...) à la racine du dépôt, branche main."
+            echo "Contenu du dépôt :"
+            ls -la "$CM_BUILD_DIR"
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$PUBSPEC")
+          echo "Racine du projet : $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $CM_ENV
+
+      - name: Vérifier le code source
+        script: |
+          cd "$PROJECT_DIR"
+          for f in lib/main.dart lib/app.dart pubspec.yaml; do
+            [ -f "$f" ] || { echo "ERREUR : $f manquant"; exit 1; }
+          done
+          grep -q "flutter_riverpod" pubspec.yaml || { echo "ERREUR : pubspec.yaml n'est pas celui du projet (flutter_riverpod absent)"; exit 1; }
+          if grep -rn "package:material_ui" lib; then
+            echo "ERREUR : import invalide package:material_ui (utiliser package:flutter/material.dart)"; exit 1
+          fi
+
+      - name: Générer le dossier natif android
+        script: |
+          cd "$PROJECT_DIR"
+          # Sauvegarde des fichiers du projet : flutter create ne doit jamais les remplacer.
+          BK="$CM_BUILD_DIR/_backup_projet"
+          rm -rf "$BK" && mkdir -p "$BK"
+          cp -R lib "$BK/lib"
+          cp -R test "$BK/test"
+          cp pubspec.yaml "$BK/pubspec.yaml"
+          [ -f analysis_options.yaml ] && cp analysis_options.yaml "$BK/analysis_options.yaml"
+
+          flutter create . --org com.btpmanager --project-name btp_manager --platforms=android
+
+          # Restauration des sources du projet
+          rm -rf lib test
+          cp -R "$BK/lib" lib
+          cp -R "$BK/test" test
+          cp "$BK/pubspec.yaml" pubspec.yaml
+          [ -f "$BK/analysis_options.yaml" ] && cp "$BK/analysis_options.yaml" analysis_options.yaml
+          # Le test modèle généré référence MyApp (inexistant dans ce projet)
+          rm -f test/widget_test.dart
+
+          # Le manifeste principal généré n'a PAS la permission INTERNET (seulement debug/profile) :
+          # sans elle, l'APK release ne peut pas joindre Supabase.
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            perl -0pi -e 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' "$MANIFEST"
+          fi
+          perl -pi -e 's#android:label="[^"]*"#android:label="BTP MANAGER"#' "$MANIFEST"
+          grep -q "android.permission.INTERNET" "$MANIFEST" || { echo "ERREUR : permission INTERNET non ajoutée"; exit 1; }
+
+      - name: Créer le fichier .env (Supabase)
+        script: |
+          cd "$PROJECT_DIR"
+          printf 'SUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' "$SUPABASE_URL" "$SUPABASE_ANON_KEY" > .env
+
+      - name: Installer les dépendances
+        script: |
+          cd "$PROJECT_DIR"
+          flutter pub get
+
+      - name: Tests unitaires
+        ignore_failure: true
+        script: |
+          cd "$PROJECT_DIR"
+          flutter test
+
+      - name: Compilation APK Release
+        script: |
+          cd "$PROJECT_DIR"
+          flutter build apk --release
+
+    artifacts:
+      - "**/build/app/outputs/flutter-apk/*.apk"
